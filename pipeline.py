@@ -1,3 +1,16 @@
+"""
+Background
+- A molecule is written as text with a SMILES
+    - Its key is the inchikey14: a 14-letter code for the molecule's skeleton
+- A spectrum is a measurement
+    - The same molecule is measured many times (different energies, adducts, instruments)
+    - The parquet has 2.5M rows (one per spectrum) but far fewer molecules
+
+Images
+Built locally with Docker, pushed to the class registry, pulled by the cluster.
+The code is shipped separately as a code bundle, so changing code does not rebuild the image.
+"""
+
 import os
 
 import flyte
@@ -32,6 +45,9 @@ def casmi_storage_options() -> dict[str, str]:
     }
 
 
+# checkpoint 1
+# counts spectra and distinct inchikey14
+# shows that features must be computed per molecule, not per spectrum
 @data_env.task
 async def explore() -> dict[str, int]:
     import polars as pl
@@ -46,7 +62,8 @@ async def explore() -> dict[str, int]:
     print(stats)
     return stats.to_dicts()[0]
 
-
+# one row per inchikey14 with its most measured SMILES
+# this table is the input of every featurizer
 @data_env.task(cache="auto")
 async def distinct_structures(fraction: float = 1.0) -> File:
     """One row per inchikey14, with its most measured SMILES (ties: smallest SMILES)."""
@@ -62,11 +79,12 @@ async def distinct_structures(fraction: float = 1.0) -> File:
         )
         .group_by("inchikey14", maintain_order=True)
         .first()
-        # Stable order -> same bytes -> same content hash -> downstream caches stay valid.
         .sort("inchikey14")
         .collect()
     )
     table = df.to_arrow()
+
+    # fraction = % of molecules kept for next operations, helps reduce computing time
     if fraction < 1.0:
         table = table.filter(pa.array(stable_fraction(table["inchikey14"]) < fraction))
     print(f"{table.num_rows:,} structures (fraction={fraction})")
