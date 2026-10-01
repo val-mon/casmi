@@ -25,7 +25,7 @@ rdkit_env = flyte.TaskEnvironment(
     image=flyte.Image.from_debian_base(
         registry=REGISTRY, name="rdkit"
     ).with_pip_packages("polars", "pyarrow", "rdkit==2026.3.3", "numpy"),
-    resources=flyte.Resources(cpu=1, memory="4Gi"),
+    resources=flyte.Resources(cpu=1, memory="3Gi"),
 )
 
 mordred_env = flyte.TaskEnvironment(
@@ -41,7 +41,14 @@ mordred_env = flyte.TaskEnvironment(
 chemeleon_env = flyte.TaskEnvironment(
     name="chemeleon",
     image=flyte.Image.from_debian_base(registry=REGISTRY, name="chemeleon")
-    .with_apt_packages("curl")
+    .with_apt_packages(
+        "curl",
+        "libxrender1",
+        "libxext6",
+        "libexpat1",
+        "libfontconfig1",
+        "libfreetype6",
+    )
     .with_pip_packages("torch", index_url="https://download.pytorch.org/whl/cpu")
     .with_pip_packages("chemprop", "numpy", "pyarrow")
     .with_commands(
@@ -233,10 +240,43 @@ async def performance_test(structures: File) -> dict[str, float]:
     }
 
 
+@chemeleon_env.task(cache="auto")
+async def chemeleon_features(structures: File) -> File:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import torch
+    from snippets.chemeleon import featurize_smiles
+
+    torch.set_num_threads(2)  # = cpu du pod, sinon torch voit tous les cœurs du nœud
+
+    pf = pq.ParquetFile(await structures.download())
+    writer = None
+    for rb in pf.iter_batches(
+        batch_size=20_000, columns=["inchikey14", "normalized_smiles"]
+    ):
+        X, valid = featurize_smiles(rb.column("normalized_smiles").to_pylist())
+
+        flat = pa.array(X.ravel(), type=pa.float32())
+        table = pa.table(
+            {
+                "inchikey14": rb.column("inchikey14"),
+                "chemeleon": pa.FixedSizeListArray.from_arrays(flat, X.shape[1]),
+                "valid": pa.array(valid),
+            }
+        )
+        if writer is None:
+            writer = pq.ParquetWriter("chemeleon.parquet", table.schema)
+        writer.write_table(table)
+        del X, flat, table
+
+    writer.close()
+    return await File.from_local("chemeleon.parquet")
+
+
 @driver_env.task
-async def pipeline() -> dict[str, float]:
+async def pipeline() -> File:
     structures = await prepare_structures()
-    return await performance_test(structures)
+    return await chemeleon_features(structures)
 
 
 if __name__ == "__main__":

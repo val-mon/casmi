@@ -6,7 +6,7 @@ from https://zenodo.org/records/15460715. Returns ((n, 2048) float32 embeddings,
 
 import numpy as np
 
-CHEMELEON_WEIGHTS = "/path/to/chemeleon_mp.pt"  # wherever your image puts the weights
+CHEMELEON_WEIGHTS = "/opt/chemeleon_mp.pt"
 
 
 class CheMeleonFingerprint:
@@ -22,7 +22,11 @@ class CheMeleonFingerprint:
         ckpt = torch.load(weights, weights_only=True)
         mp = nn.BondMessagePassing(**ckpt["hyper_parameters"])
         mp.load_state_dict(ckpt["state_dict"])
-        self.model = MPNN(message_passing=mp, agg=nn.MeanAggregation(), predictor=RegressionFFN(input_dim=mp.output_dim))
+        self.model = MPNN(
+            message_passing=mp,
+            agg=nn.MeanAggregation(),
+            predictor=RegressionFFN(input_dim=mp.output_dim),
+        )
         self.model.eval()
         self.dim = mp.output_dim
 
@@ -35,14 +39,20 @@ class CheMeleonFingerprint:
             return self.model.fingerprint(bmg).numpy(force=True)
 
 
-def featurize_smiles(smiles: list[str], batch_size: int = 256) -> tuple[np.ndarray, np.ndarray]:
+def featurize_smiles(
+    smiles: list[str], batch_size: int = 256
+) -> tuple[np.ndarray, np.ndarray]:
     from rdkit import Chem, RDLogger
 
     RDLogger.DisableLog("rdApp.*")
     model = CheMeleonFingerprint()
     mols = [Chem.MolFromSmiles(s) for s in smiles]
-    valid = np.array([m is not None and m.GetNumAtoms() > 0 for m in mols], dtype=bool)  # "" parses to 0 atoms
-    out = np.zeros((len(smiles), model.dim), dtype=np.float32)  # also right for a shard with nothing valid
+    valid = np.array(
+        [m is not None and m.GetNumAtoms() > 0 for m in mols], dtype=bool
+    )  # "" parses to 0 atoms
+    out = np.zeros(
+        (len(smiles), model.dim), dtype=np.float32
+    )  # also right for a shard with nothing valid
     idx = np.flatnonzero(valid)
     for start in range(0, len(idx), batch_size):
         batch = idx[start : start + batch_size]
